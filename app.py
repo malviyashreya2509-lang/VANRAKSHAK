@@ -155,7 +155,8 @@ def weather():
 
             return jsonify({
                 "success": False,
-                "error": "Weather API unavailable"
+                "error": "Weather API unavailable",
+                "details": response.json()
             }), 502
 
         data = response.json()

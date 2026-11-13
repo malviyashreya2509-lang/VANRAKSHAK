@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 import requests
 import logging
+import os
 from datetime import datetime
 
 app = Flask(__name__)
@@ -71,25 +72,25 @@ def location():
             "locations": locations
         })
 
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException:
 
-        logging.error("Location API error: %s", e)
+        logging.exception("Location API error")
 
         return jsonify({
             "error": "Location service unavailable"
         }), 502
 
-    except Exception as e:
+    except Exception:
 
         logging.exception("Location error")
 
         return jsonify({
-            "error": str(e)
+            "error": "Location search failed"
         }), 500
 
 
 # ==========================================
-# WEATHER API
+# WEATHER API - WEATHERAPI.COM
 # ==========================================
 
 @app.route("/api/weather")
@@ -97,112 +98,84 @@ def weather():
 
     try:
 
-        lat = float(request.args.get("lat", ""))
-        lon = float(request.args.get("lon", ""))
+        lat = request.args.get("lat", type=float)
+        lon = request.args.get("lon", type=float)
 
         # Validate coordinates
+        if lat is None or lon is None:
+
+            return jsonify({
+                "success": False,
+                "error": "Latitude and longitude required"
+            }), 400
+
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
 
             return jsonify({
+                "success": False,
                 "error": "Invalid coordinates"
             }), 400
 
-        # Open-Meteo API
-        url = "https://api.open-meteo.com/v1/forecast"
+        # Get API key from Render Environment
+        api_key = os.environ.get("WEATHER_API_KEY")
+
+        if not api_key:
+
+            return jsonify({
+                "success": False,
+                "error": "Weather API key missing"
+            }), 500
+
+        # WeatherAPI current weather
+        url = "https://api.weatherapi.com/v1/current.json"
 
         params = {
-
-            "latitude": lat,
-            "longitude": lon,
-            "timezone": "auto",
-            "forecast_days": 1,
-
-            "current": (
-                "temperature_2m,"
-                "relative_humidity_2m,"
-                "precipitation,"
-                "rain,"
-                "wind_speed_10m"
-            ),
-
-            "hourly": (
-                "soil_moisture_0_to_1cm,"
-                "shortwave_radiation"
-            )
+            "key": api_key,
+            "q": f"{lat},{lon}",
+            "aqi": "no"
         }
 
-        r = requests.get(
+        response = requests.get(
             url,
             params=params,
             timeout=20
         )
 
-        logging.info("Weather API status: %s", r.status_code)
+        logging.info(
+            "WeatherAPI status: %s",
+            response.status_code
+        )
 
-        if r.status_code != 200:
+        if response.status_code != 200:
 
-            logging.error("Weather API response: %s", r.text)
+            logging.error(
+                "WeatherAPI response: %s",
+                response.text
+            )
 
             return jsonify({
-                "error": "Weather API unavailable",
-                "details": r.text
+                "success": False,
+                "error": "Weather API unavailable"
             }), 502
 
-        data = r.json()
+        data = response.json()
 
         current = data.get("current", {})
-        hourly = data.get("hourly", {})
+        location_data = data.get("location", {})
 
-        # Current weather values
-        temperature = current.get("temperature_2m")
+        # Weather values
+        temperature = current.get("temp_c")
+        humidity = current.get("humidity")
+        rainfall = current.get("precip_mm")
+        wind_speed = current.get("wind_kph")
 
-        humidity = current.get(
-            "relative_humidity_2m"
-        )
-
-        rainfall = current.get("precipitation")
-
-        rain = current.get("rain")
-
-        wind_speed = current.get(
-            "wind_speed_10m"
-        )
-
-        # Hourly values
-        times = hourly.get("time", [])
-
-        soils = hourly.get(
-            "soil_moisture_0_to_1cm", []
-        )
-
-        radiation = hourly.get(
-            "shortwave_radiation", []
-        )
-
+        # Soil moisture and solar unavailable
         soil = None
         solar = None
 
-        if times:
-
-            current_time = current.get("time", "")
-
-            # Find nearest matching hour
-            index = next(
-                (
-                    i for i, t in enumerate(times)
-                    if t[:13] == current_time[:13]
-                ),
-                0
-            )
-
-            if index < len(soils):
-                soil = soils[index]
-
-            if index < len(radiation):
-                solar = radiation[index]
-
-        # Weather response
         result = {
+
+            "success": True,
 
             "temperature": temperature,
 
@@ -210,7 +183,7 @@ def weather():
 
             "rainfall": rainfall,
 
-            "rain": rain,
+            "rain": rainfall,
 
             "wind_speed": wind_speed,
 
@@ -222,45 +195,45 @@ def weather():
 
             "solar_radiation": solar,
 
-            "latitude": lat,
+            "latitude": location_data.get("lat", lat),
 
-            "longitude": lon,
+            "longitude": location_data.get("lon", lon),
 
-            "location": data.get("timezone")
+            "location": location_data.get("name"),
+
+            "country": location_data.get("country"),
+
+            "weather_time": current.get("last_updated")
 
         }
 
         return jsonify(result)
-
-    except ValueError:
-
-        return jsonify({
-            "error": "Latitude and longitude are required"
-        }), 400
 
     except requests.exceptions.Timeout:
 
         logging.error("Weather API timeout")
 
         return jsonify({
+            "success": False,
             "error": "Weather API timeout"
         }), 504
 
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException:
 
-        logging.error("Weather connection error: %s", e)
+        logging.exception("Weather connection error")
 
         return jsonify({
-            "error": "Weather service unavailable"
+            "success": False,
+            "error": "Weather connection failed"
         }), 502
 
-    except Exception as e:
+    except Exception:
 
         logging.exception("Weather error")
 
         return jsonify({
-            "error": "Internal weather error",
-            "details": str(e)
+            "success": False,
+            "error": "Internal weather error"
         }), 500
 
 
@@ -330,6 +303,10 @@ def calculate_risk_score(
     return round(min(max(score, 0), 100), 2)
 
 
+# ==========================================
+# RISK LEVEL
+# ==========================================
+
 def get_risk_level(score):
 
     if score < 20:
@@ -359,7 +336,7 @@ def risk():
 
         data = request.get_json(silent=True) or {}
 
-        # Read weather values
+        # Weather inputs
         temperature = data.get("temperature")
 
         humidity = data.get("humidity")
@@ -381,7 +358,7 @@ def risk():
             data.get("solar")
         )
 
-        # Convert to numbers
+        # Convert values safely
         temperature = (
             float(temperature)
             if temperature is not None else None
@@ -412,14 +389,32 @@ def risk():
             if solar_radiation is not None else None
         )
 
-        # Validate required weather inputs
+        # Validate required inputs
         if temperature is None or humidity is None:
 
             return jsonify({
                 "error": "Temperature and humidity required"
             }), 400
 
-        # Risk calculation
+        if not (0 <= humidity <= 100):
+
+            return jsonify({
+                "error": "Humidity must be between 0 and 100"
+            }), 400
+
+        if rainfall is not None and rainfall < 0:
+
+            return jsonify({
+                "error": "Rainfall cannot be negative"
+            }), 400
+
+        if wind_speed is not None and wind_speed < 0:
+
+            return jsonify({
+                "error": "Wind speed cannot be negative"
+            }), 400
+
+        # Calculate risk
         risk_score = calculate_risk_score(
             temperature,
             humidity,
@@ -434,37 +429,51 @@ def risk():
         # Recommendations
         recommendations = []
 
-        if risk_score >= 60:
+        if risk_score >= 80:
 
-            recommendations.append(
-                "High fire danger. Increase forest monitoring."
-            )
+            recommendations.extend([
+                "Extreme fire danger. Immediate forest monitoring required.",
+                "Avoid all open flames and burning activities.",
+                "Alert forest authorities immediately.",
+                "Increase patrols in vulnerable forest areas."
+            ])
 
-            recommendations.append(
-                "Avoid open flames in forest areas."
-            )
+        elif risk_score >= 60:
 
-            recommendations.append(
-                "Alert nearby forest authorities."
-            )
+            recommendations.extend([
+                "Very high fire danger. Increase forest monitoring.",
+                "Avoid open flames in forest areas.",
+                "Alert nearby forest authorities.",
+                "Monitor vulnerable forest zones regularly."
+            ])
 
         elif risk_score >= 40:
 
-            recommendations.append(
-                "Monitor forest conditions regularly."
-            )
+            recommendations.extend([
+                "High fire danger. Monitor forest conditions regularly.",
+                "Avoid burning activities near vegetation.",
+                "Keep fire prevention equipment ready."
+            ])
 
-            recommendations.append(
-                "Avoid burning activities near vegetation."
-            )
+        elif risk_score >= 20:
+
+            recommendations.extend([
+                "Moderate fire risk. Continue forest monitoring.",
+                "Avoid careless disposal of burning materials.",
+                "Maintain awareness of changing weather conditions."
+            ])
 
         else:
 
-            recommendations.append(
-                "Continue routine forest monitoring."
-            )
+            recommendations.extend([
+                "Low fire risk under current weather conditions.",
+                "Continue routine forest monitoring.",
+                "Follow standard forest fire prevention practices."
+            ])
 
         return jsonify({
+
+            "success": True,
 
             "risk_score": risk_score,
 
@@ -476,9 +485,7 @@ def risk():
 
             "recommendations": recommendations,
 
-            "message": (
-                "Forest fire risk calculated successfully"
-            )
+            "message": "Forest fire risk calculated successfully"
 
         })
 
@@ -488,12 +495,12 @@ def risk():
             "error": "Invalid weather input values"
         }), 400
 
-    except Exception as e:
+    except Exception:
 
         logging.exception("Risk calculation error")
 
         return jsonify({
-            "error": str(e)
+            "error": "Risk calculation failed"
         }), 500
 
 
@@ -505,6 +512,6 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=5000,
-        debug=True
+        port=int(os.environ.get("PORT", 5000)),
+        debug=False
     )
